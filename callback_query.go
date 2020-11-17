@@ -4,6 +4,10 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"context"
+
+    "github.com/opentracing/opentracing-go"
+
 )
 
 // Define callbacks for querying
@@ -25,6 +29,18 @@ func queryCallback(scope *Scope) {
 	}
 
 	defer scope.trace(NowFunc())
+	val,_ := scope.Get("_context")
+
+	rootCtx := context.Background()
+    if ctx, ok := val.(context.Context); ok {
+       rootCtx = ctx
+    }
+
+    span, childCtx := opentracing.StartSpanFromContext(
+        rootCtx,
+        "gorm:internal_queryCallback",
+    )
+    defer span.Finish()
 
 	var (
 		isSlice, isPtr bool
@@ -56,7 +72,12 @@ func queryCallback(scope *Scope) {
 		return
 	}
 
+	prepareSpan,_ := opentracing.StartSpanFromContext(
+        childCtx,
+        "gorm:internal_queryCallback:prepareQuery",
+    )
 	scope.prepareQuerySQL()
+	prepareSpan.Finish()
 
 	if !scope.HasError() {
 		scope.db.RowsAffected = 0
@@ -65,9 +86,20 @@ func queryCallback(scope *Scope) {
 			scope.SQL = fmt.Sprint(str) + scope.SQL
 		}
 
-		if rows, err := scope.SQLDB().Query(scope.SQL, scope.SQLVars...); scope.Err(err) == nil {
-			defer rows.Close()
+		querySpan,queryCtx := opentracing.StartSpanFromContext(
+            childCtx,
+            "gorm:internal_queryCallback:query",
+        )
 
+		rows, err := scope.SQLDB().Query(scope.SQL, scope.SQLVars...)
+        defer  querySpan.Finish()
+
+		if scope.Err(err) == nil {
+			defer rows.Close()
+            scanSpan,_ := opentracing.StartSpanFromContext(
+                queryCtx,
+                "gorm:internal_queryCallback:scan",
+            )
 			columns, _ := rows.Columns()
 			for rows.Next() {
 				scope.db.RowsAffected++
@@ -88,13 +120,19 @@ func queryCallback(scope *Scope) {
 				}
 			}
 
+
 			if err := rows.Err(); err != nil {
+			    scanSpan.SetTag("rows.err", err.Error())
 				scope.Err(err)
 			} else if scope.db.RowsAffected == 0 && !isSlice {
+                scanSpan.SetTag("rows.err",ErrRecordNotFound.Error())
 				scope.Err(ErrRecordNotFound)
 			}
+            scanSpan.Finish()
 		}
+
 	}
+
 }
 
 // afterQueryCallback will invoke `AfterFind` method after querying
