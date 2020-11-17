@@ -16,7 +16,7 @@ func init() {
 // queryCallback used to query data from database
 func queryCallback(scope *Scope) {
 	defer scope.trace(NowFunc())
-
+    fmt.Printf("[gorm] queryCallback beginning,dbid:%s \n",scope.instanceID)
 	var (
 		isSlice, isPtr bool
 		resultType     reflect.Type
@@ -46,9 +46,9 @@ func queryCallback(scope *Scope) {
 		scope.Err(errors.New("unsupported destination, should be slice or struct"))
 		return
 	}
-
+    fmt.Printf("[gorm] queryCallback ready to prepareQuerySQL \n")
 	scope.prepareQuerySQL()
-
+    fmt.Printf("[gorm] queryCallback  prepareQuerySQL complete \n")
 	if !scope.HasError() {
 		scope.db.RowsAffected = 0
 		if str, ok := scope.Get("gorm:query_option"); ok {
@@ -57,7 +57,7 @@ func queryCallback(scope *Scope) {
 
 		if rows, err := scope.SQLDB().Query(scope.SQL, scope.SQLVars...); scope.Err(err) == nil {
 			defer rows.Close()
-
+            fmt.Printf("[gorm] queryCallback  ready to scan rows \n")
 			columns, _ := rows.Columns()
 			for rows.Next() {
 				scope.db.RowsAffected++
@@ -77,7 +77,7 @@ func queryCallback(scope *Scope) {
 					}
 				}
 			}
-
+            fmt.Printf("[gorm] queryCallback  scan rows complete \n")
 			if err := rows.Err(); err != nil {
 				scope.Err(err)
 			} else if scope.db.RowsAffected == 0 && !isSlice {
