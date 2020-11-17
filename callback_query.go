@@ -4,6 +4,10 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"context"
+
+    "github.com/opentracing/opentracing-go"
+
 )
 
 // Define callbacks for querying
@@ -16,7 +20,19 @@ func init() {
 // queryCallback used to query data from database
 func queryCallback(scope *Scope) {
 	defer scope.trace(NowFunc())
-    fmt.Printf("[gorm] queryCallback beginning,dbid:%s \n",scope.instanceID)
+	val,_ := scope.Get("_context")
+
+	rootCtx := context.Background()
+    if ctx, ok := val.(context.Context); ok {
+       rootCtx = ctx
+    }
+
+    span, childCtx := opentracing.StartSpanFromContext(
+        rootCtx,
+        "gorm:internal_queryCallback",
+    )
+    defer span.Finish()
+
 	var (
 		isSlice, isPtr bool
 		resultType     reflect.Type
@@ -46,18 +62,34 @@ func queryCallback(scope *Scope) {
 		scope.Err(errors.New("unsupported destination, should be slice or struct"))
 		return
 	}
-    fmt.Printf("[gorm] queryCallback ready to prepareQuerySQL \n")
+
+	prepareSpan,_ := opentracing.StartSpanFromContext(
+        childCtx,
+        "gorm:internal_queryCallback:prepareQuery",
+    )
 	scope.prepareQuerySQL()
-    fmt.Printf("[gorm] queryCallback  prepareQuerySQL complete \n")
+	prepareSpan.Finish()
+
 	if !scope.HasError() {
 		scope.db.RowsAffected = 0
 		if str, ok := scope.Get("gorm:query_option"); ok {
 			scope.SQL += addExtraSpaceIfExist(fmt.Sprint(str))
 		}
 
-		if rows, err := scope.SQLDB().Query(scope.SQL, scope.SQLVars...); scope.Err(err) == nil {
+		querySpan,queryCtx := opentracing.StartSpanFromContext(
+            childCtx,
+            "gorm:internal_queryCallback:query",
+        )
+
+		rows, err := scope.SQLDB().Query(scope.SQL, scope.SQLVars...)
+        defer  querySpan.Finish()
+
+		if scope.Err(err) == nil {
 			defer rows.Close()
-            fmt.Printf("[gorm] queryCallback  ready to scan rows \n")
+            scanSpan,_ := opentracing.StartSpanFromContext(
+                queryCtx,
+                "gorm:internal_queryCallback:scan",
+            )
 			columns, _ := rows.Columns()
 			for rows.Next() {
 				scope.db.RowsAffected++
@@ -77,14 +109,20 @@ func queryCallback(scope *Scope) {
 					}
 				}
 			}
-            fmt.Printf("[gorm] queryCallback  scan rows complete \n")
+
+
 			if err := rows.Err(); err != nil {
+			    scanSpan.SetTag("rows.err", err.Error())
 				scope.Err(err)
 			} else if scope.db.RowsAffected == 0 && !isSlice {
+                scanSpan.SetTag("rows.err",ErrRecordNotFound.Error())
 				scope.Err(ErrRecordNotFound)
 			}
+            scanSpan.Finish()
 		}
+
 	}
+
 }
 
 // afterQueryCallback will invoke `AfterFind` method after querying
